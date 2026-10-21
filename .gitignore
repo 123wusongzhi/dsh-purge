@@ -1,5 +1,6 @@
 # 不上传
 node_modules/
+.deployment-backup/
 *.tgz
 npm-debug.log*
 *.log
