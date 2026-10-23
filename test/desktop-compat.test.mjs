@@ -8,6 +8,33 @@ import { ALL_PATCHES, applyReplacementsToText, enumeratePatchAiBases } from "../
 import { hostPromptKeepsInject } from "../lib/host-clean.js";
 import { rewritePromptAssembly } from "../lib/identity.js";
 
+test("restart helper owns shutdown and closes the shell before the Host", () => {
+  const desktop = fs.readFileSync(new URL('../lib/desktop.js', import.meta.url), 'utf8');
+  const spawnBody = desktop.slice(desktop.indexOf('function spawnHelper('), desktop.indexOf('\nfunction desktopRuntimeOf('));
+  const payloads = [], timers = [];
+  const spawnHelper = new Function('restartPlan', 'spawn', 'helperEnv', 'process', 'path', 'setTimeout', `${spawnBody}; return spawnHelper;`)(
+    () => ({execPath:'fixture.exe',argv:[],cwd:'fixture'}),
+    () => ({unref(){}}),
+    payload => { payloads.push(payload); return {}; },
+    {execPath:'fixture.exe',pid:2,ppid:1,exit(){throw new Error('must not exit during test');}},
+    path,
+    callback => timers.push(callback),
+  );
+  spawnHelper('helper.js',{killApp:true});
+  assert.equal(timers.length,0);
+  assert.equal(payloads[0].shellPid,1);
+  spawnHelper('helper.js',{killApp:false});
+  assert.equal(timers.length,1);
+  const helper = fs.readFileSync(new URL('../lib/restart-desktop.js', import.meta.url), 'utf8');
+  const killBody = helper.slice(helper.indexOf('function killOtherDesktopProcesses('),helper.indexOf('\nasync function moveAsarAsideAsync('));
+  const killed=[];
+  const kill = new Function('listDesktopPids','info','process',`${killBody}; return killOtherDesktopProcesses;`)(
+    () => [2,99,1],{execPath:'fixture.exe',shellPid:1},{pid:99,platform:'win32',kill:pid=>killed.push(pid)},
+  );
+  kill(99);
+  assert.deepEqual(killed,[1,2]);
+});
+
 const currentAssembly = `// system-prompt/assemble
 async function assemble(completeSection, runtimeContextSuppressed, contextByName, transformed) {
   if (completeSection === void 0 && !runtimeContextSuppressed) return transformed;
