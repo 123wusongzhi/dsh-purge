@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { EventEmitter } from "node:events";
 import { ALL_PATCHES, applyReplacementsToText, enumeratePatchAiBases } from "../lib/core.js";
 import { hostPromptKeepsInject } from "../lib/host-clean.js";
 import { rewritePromptAssembly } from "../lib/identity.js";
@@ -17,6 +18,41 @@ async function assemble(completeSection, runtimeContextSuppressed, contextByName
     contexts: runtimeContextSuppressed ? transformed.contexts.filter((entry) => requiredContexts.has(entry.name)) : transformed.contexts
   };
 }`;
+
+test("desktop Host exits are reported for official and legacy patched callbacks", async () => {
+  const patch = ALL_PATCHES.find((entry) => entry.id === 83);
+  const oldBranches = [
+    'if (code !== 0 && code !== null) this.fail(new Error(`exited ${code}${suffix}`));\n\t\t\t\telse this.fail(new Error(`stopped${suffix}`));',
+    'if (code === null || signal) { resolve(); return; }\n\t\t\t\tif (code !== 0) this.fail(new Error(`exited ${code}${suffix}`));\n\t\t\t\telse this.fail(new Error(`stopped${suffix}`));',
+    'if (code === null || signal) { resolve(); return; }\n\t\t\t\t// [dsh-purge] close no-fail v2\n\t\t\t\tif (code !== 0) this.fail(new Error(`exited ${code}${suffix}`));',
+  ];
+  for (const [index, branch] of oldBranches.entries()) {
+    const original = '\t\tthis.exitPromise = new Promise((resolve) => {\n' +
+      `\t\t\tchild.once("close", (${index === 0 ? 'code' : 'code, signal'}) => {\n` +
+      '\t\t\t\tconst suffix = this.stderr.trim() === "" ? "" : `: ${this.stderr.trim()}`;\n' +
+      `\t\t\t\t${branch}\n\t\t\t\tresolve();\n\t\t\t});\n\t\t});`;
+    for (const input of [original, original.replace(/\n/g, '\r\n')]) {
+      const result = applyReplacementsToText(input, patch, 'main.js');
+      assert.equal(result.changed, true);
+      assert.equal(applyReplacementsToText(result.text, patch, 'main.js').changed, false);
+      for (const stopping of [false, true]) {
+        for (const [code, signal] of [[0, null], [null, 'SIGTERM'], [42, null]]) {
+          const child = new EventEmitter();
+          const errors = [];
+          const host = {stderr:'fixture diagnostic', stopping, fail(error) { if (!this.stopping) errors.push(error); }};
+          new Function('child', result.text).call(host, child);
+          child.emit('close', code, signal);
+          await host.exitPromise;
+          assert.equal(errors.length, stopping ? 0 : 1);
+          if (!stopping) {
+            assert.match(errors[0].message, /fixture diagnostic/);
+            if (signal) assert.match(errors[0].message, /SIGTERM/);
+          }
+        }
+      }
+    }
+  }
+});
 
 test("current desktop complete prompts keep injected sections and required runtime context", async () => {
   const patch = ALL_PATCHES.find((entry) => entry.id === 40);
